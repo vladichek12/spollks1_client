@@ -1,103 +1,156 @@
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.Locale;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Scanner;
 
 public class TCPClient {
+    private static Map<String, Long> fileTransferState = new HashMap<>();
+
     public static void main(String[] args) {
-        try {
-            Socket serverSocket = new Socket("localhost", 8085);
+        String serverAddress = "localhost"; // Адрес сервера
+        int serverPort = 8080; // Порт сервера
 
-            // Создаем потоки для чтения и записи данных
-            BufferedReader in = new BufferedReader(new InputStreamReader(serverSocket.getInputStream()));
-            PrintWriter out = new PrintWriter(serverSocket.getOutputStream(), true);
+        try (Socket socket = new Socket(serverAddress, serverPort);
+             DataInputStream dataInputStream = new DataInputStream(socket.getInputStream());
+             DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
+             Scanner scanner = new Scanner(System.in)) {
 
-            // Создаем поток для ввода команд с консоли
-            Scanner scanner = new Scanner(System.in);
-
-            String inputLine;
             while (true) {
-                // Считываем команду с консоли
-                System.out.print("Введите команду (или 'CLOSE' для завершения): ");
-                inputLine = scanner.nextLine();
+                System.out.print("Введите команду (echo, time, upload, download, exit): ");
+                String command = scanner.nextLine();
+                sendCommand(dataOutputStream, command);
 
-                if (inputLine.equalsIgnoreCase("CLOSE")) {
-                    // Если команда 'CLOSE', то завершаем клиент
+                if (command.equalsIgnoreCase("exit")) {
                     break;
-                } else if (inputLine.toUpperCase(Locale.ROOT).contains("UPLOAD")) {
-                    String[] commandArgs = inputLine.split(" ");
-                    // Если команда 'UPLOAD', то отправляем файл на сервер
-                    try {
-                        File file = new File(commandArgs[1]);
-                        if(!file.exists())
-                            throw new FileNotExistException();
-                        out.println(inputLine);
-                        sendFile(serverSocket.getOutputStream(), commandArgs[1]);
-                        String response = in.readLine();
-                        System.out.println("Сервер ответил: " + response);
-                    }
-                    catch (FileNotExistException e){
-                        System.out.println("Файла с таким именем не существует");
-                    }
-                } else if (inputLine.toUpperCase(Locale.ROOT).contains("DOWNLOAD")) {
-                    // Если команда 'DOWNLOAD', то получаем файл с сервера
-                    out.println(inputLine);
-                    String[] commandArgs = inputLine.split(" ");
-                    Path path = Paths.get(commandArgs[1]);
-                    receiveFile(serverSocket.getInputStream(),
-                            path.getFileName().toString());
-                } else {
-                    // Отправляем обычную команду на сервер
-                    out.println(inputLine);
-
-                    // Принимаем и выводим ответ от сервера
-                    String response = in.readLine();
-                    System.out.println("Сервер ответил: " + response);
+                } else if (command.startsWith("echo ")) {
+                    String echoResponse = dataInputStream.readUTF();
+                    System.out.println("Ответ сервера (echo): " + echoResponse);
+                } else if (command.startsWith("time")) {
+                    String timeResponse = dataInputStream.readUTF();
+                    System.out.println("Ответ сервера (time): " + timeResponse);
+                } else if (command.startsWith("upload ")) {
+                    String filePath = command.substring(7);
+                    sendFile(dataOutputStream,dataInputStream, filePath);
+                } else if (command.startsWith("download ")) {
+                    String filePath = command.substring(12);
+                    receiveFile(dataInputStream, filePath);
                 }
             }
-
-            // Закрытие соединения и потоков
-            in.close();
-            out.close();
-            serverSocket.close();
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    private static void sendFile(OutputStream outputStream, String fileName) throws IOException {
-        // Реализуйте отправку файла на сервер с указанным именем
-        try (FileInputStream fileInputStream = new FileInputStream(fileName)) {
-            byte[] buffer = new byte[1024];
+    private static void sendCommand(DataOutputStream dataOutputStream, String command) throws IOException {
+        dataOutputStream.writeUTF(command);
+    }
+
+    private static void sendFile(DataOutputStream dataOutputStream,
+                                 DataInputStream dataInputStream,
+                                 String filePath) throws IOException {
+        String endOfFileMarker = "###END_OF_FILE###";
+        File file = new File(filePath);
+        try (FileInputStream fileInputStream = new FileInputStream(file)) {
+            byte[] buffer = new byte[8192]; // Увеличьте размер буфера, если нужно
             int bytesRead;
             while ((bytesRead = fileInputStream.read(buffer)) != -1) {
-                outputStream.write(buffer, 0, bytesRead);
+                dataOutputStream.write(buffer, 0, bytesRead);
             }
-            System.out.println("Файл " + fileName + " успешно отправлен на сервер.");
-            outputStream.write("EOF".getBytes(StandardCharsets.UTF_8));
+
+            // Добавляем нулевой байт для обозначения конца файла
+            dataOutputStream.write(endOfFileMarker.getBytes(StandardCharsets.UTF_8));
+            dataOutputStream.flush();
+            System.out.println("Файл " + filePath + " успешно отправлен на сервер.");
+
         }
     }
 
-    private static void receiveFile(InputStream inputStream, String fileName) throws IOException {
-        try (FileOutputStream fileOutputStream = new FileOutputStream(fileName)) {
-            byte[] buffer = new byte[1024];
+
+    private static void receiveFile(DataInputStream dataInputStream, String filePath) throws IOException {
+        String endOfFileMarker = "###END_OF_FILE###";
+        byte[] endOfFileMarkerBytes = endOfFileMarker.getBytes();
+        long start = System.currentTimeMillis();
+        try (FileOutputStream fileOutputStream = new FileOutputStream(filePath)) {
+            byte[] buffer = new byte[8192]; // Увеличьте размер буфера, если нужно
             int bytesRead;
-            while ((bytesRead = inputStream.read(buffer)) != -1) {
-                if (new String(buffer, 0, bytesRead, StandardCharsets.UTF_8).contains("EOF")) {
-                    // Если в данных найден EOF, завершаем запись в файл
+            boolean eofFound = false; // Флаг для обозначения, что найден конец файла
+            if(fileTransferState.containsKey(filePath)){
+                fileOutputStream.getChannel().position(fileTransferState.get(filePath));
+            }
+            long read = 0;
+            fileTransferState.put(filePath,read);
+            while ((bytesRead = dataInputStream.read(buffer)) != -1) {
+                read += bytesRead;
+                fileTransferState.put(filePath,read);
+                // Проверяем, содержит ли буфер байты конца файла
+                if (containsEndOfFileMarker(buffer, bytesRead, endOfFileMarkerBytes)) {
+                    int endIndex = findEndOfFileMarker(buffer, bytesRead, endOfFileMarkerBytes);
+                    fileOutputStream.write(buffer, 0, endIndex); // Записываем байты до конца файла
+                    eofFound = true;
+                    break; // Конец файла
+                }
+                // Записываем данные в файл
+                fileOutputStream.write(buffer, 0, bytesRead);
+/*                try {
+                    Thread.sleep(3000000);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }*/
+            }
+
+            // Если конец файла был найден, дописываем остаток данных
+            if (eofFound) {
+                int remainingBytes = bytesRead - endOfFileMarkerBytes.length;
+                fileOutputStream.write(buffer, bytesRead - remainingBytes, remainingBytes);
+            }
+
+            fileOutputStream.flush();
+            System.out.println("Файл " + filePath + " успешно получен с клиента.");
+        }
+        long end = System.currentTimeMillis();
+        long elapsedTime = end - start;
+        long fileSize = new File(filePath).length(); // Размер полученного файла в байтах
+        long bitrate = (long)(fileSize / (double) elapsedTime) * 1000; // Скорость передачи в байтах в секунду
+        if(fileTransferState.get(filePath) >=fileSize)
+            fileTransferState.remove(filePath);
+        System.out.println("Скорость передачи файла: " + bitrate + " байт/сек");
+    }
+
+    private static boolean containsEndOfFileMarker(byte[] buffer, int bytesRead, byte[] endOfFileMarkerBytes) {
+        if (bytesRead < endOfFileMarkerBytes.length) {
+            return false;
+        }
+
+        for (int i = 0; i <= bytesRead - endOfFileMarkerBytes.length; i++) {
+            boolean found = true;
+            for (int j = 0; j < endOfFileMarkerBytes.length; j++) {
+                if (buffer[i + j] != endOfFileMarkerBytes[j]) {
+                    found = false;
                     break;
                 }
-                if(new String(buffer, 0, bytesRead, StandardCharsets.UTF_8).contains("не существует"))
-                    throw new FileNotExistException();
-                fileOutputStream.write(buffer, 0, bytesRead);
             }
-            System.out.println("Файл " + fileName + " успешно получен с сервера.");
+            if (found) {
+                return true;
+            }
         }
-        catch (FileNotExistException e) {
-            System.out.println("Файла с таким именем не существует");
+        return false;
+    }
+
+    private static int findEndOfFileMarker(byte[] buffer, int bytesRead, byte[] endOfFileMarkerBytes) {
+        for (int i = 0; i <= bytesRead - endOfFileMarkerBytes.length; i++) {
+            boolean found = true;
+            for (int j = 0; j < endOfFileMarkerBytes.length; j++) {
+                if (buffer[i + j] != endOfFileMarkerBytes[j]) {
+                    found = false;
+                    break;
+                }
+            }
+            if (found) {
+                return i;
+            }
         }
+        return -1;
     }
 }
