@@ -13,6 +13,7 @@ public class TCPClient {
         int serverPort = 8080; // Порт сервера
 
         try (Socket socket = new Socket(serverAddress, serverPort);
+
              DataInputStream dataInputStream = new DataInputStream(socket.getInputStream());
              DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
              Scanner scanner = new Scanner(System.in)) {
